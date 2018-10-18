@@ -114,6 +114,14 @@ class Attention(nn.Module):
         a = self.resid_dropout(a)
         return a
 
+    def state_dict(self, *args, **kwargs):
+        # Do not save attn.b
+        state_dict = super().state_dict(*args, **kwargs)
+        for param_name in list(state_dict.keys()):
+            if param_name.endswith(".attn.b"):
+                del state_dict[param_name]
+        return state_dict
+
 
 class MLP(nn.Module):
     def __init__(self, n_state, cfg):  # in MLP: n_state=3072 (4 * n_embd)
@@ -168,6 +176,38 @@ class TransformerModel(nn.Module):
         for block in self.h:
             h = block(h)
         return h
+
+
+class WeightedTransformerModel(TransformerModel):
+
+    CONST = 1000
+
+    def __init__(self, cfg, vocab=40990, n_ctx=512):
+        super().__init__(cfg=cfg, vocab=vocab, n_ctx=n_ctx)
+        self.level_weights = Parameter(torch.zeros(len(self.h) + 1))
+        self.overall_weight = Parameter(torch.ones(1) / self.CONST)
+
+    def forward(self, x):
+        x = x.view(-1, x.size(-2), x.size(-1))
+        e = self.embed(x)
+        # Add the position information to the input embeddings
+        h = e.sum(dim=2)
+
+        normalized_weights = F.softmax(self.level_weights * self.CONST, dim=0)
+        agg_h = normalized_weights[0] * h
+        for weight, block in zip(normalized_weights[1:], self.h):
+            h = block(h)
+            agg_h = agg_h + weight * h
+        """
+        agg_ls = h
+        for weight, block in zip(normalized_weights[1:], self.h):
+            h = block(h)
+            agg_ls.append(weight * h)
+        return self.overall_weight * sum(agg_ls)
+        """
+        print(agg_h.shape)
+        print(self.level_weights)
+        return self.CONST * self.overall_weight * agg_h
 
 
 class LMHead(nn.Module):
